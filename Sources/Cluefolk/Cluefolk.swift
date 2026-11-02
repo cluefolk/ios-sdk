@@ -83,7 +83,7 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
 
 @MainActor @objc(CLFCluefolk) public final class Cluefolk: NSObject {
   /// The SDK version, as tagged in the Swift package repository.
-  @objc public nonisolated static let sdkVersion = "0.3.0"
+  @objc public nonisolated static let sdkVersion = "0.3.1"
   @objc public static let shared = Cluefolk()
   @objc public weak var eventListener: CluefolkEventListener? {
     didSet { if isReady { eventListener?.onCluefolkReady() } }
