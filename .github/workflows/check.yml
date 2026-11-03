@@ -4,11 +4,14 @@ permissions: {contents: read}
 jobs:
   compile:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: {persist-credentials: false}
       - run: xcodebuild -quiet -scheme Cluefolk -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES build
-      - name: Test on an available iPhone simulator
+      - name: Boot an available iPhone simulator
+        id: simulator
+        timeout-minutes: 4
         shell: bash
         run: |
           set -euo pipefail
@@ -16,8 +19,25 @@ jobs:
             xcrun simctl list devices available --json |
               jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid'
           )"
-          xcodebuild -quiet -scheme Cluefolk \
-            -destination "platform=iOS Simulator,id=$simulator_id" \
+          simulator_state="$(xcrun simctl list devices available --json |
+            jq -er --arg id "$simulator_id" '.devices[][] | select(.udid == $id) | .state')"
+          if [ "$simulator_state" != Booted ]; then
+            xcrun simctl boot "$simulator_id"
+          fi
+          xcrun simctl bootstatus "$simulator_id" -b
+          echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
+          echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
+      - name: Test on the booted iPhone simulator
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -scheme Cluefolk \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }},arch=${{ steps.simulator.outputs.arch }}" \
+            -destination-timeout 60 \
+            -parallel-testing-enabled NO \
+            -maximum-concurrent-test-simulator-destinations 1 \
+            -resultBundlePath "$RUNNER_TEMP/CluefolkTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             GCC_TREAT_WARNINGS_AS_ERRORS=YES \
