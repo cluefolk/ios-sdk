@@ -7,6 +7,25 @@ import XCTest
 /// checked like the widget's parseAppearance does.
 final class AppearanceBuilderTests: XCTestCase {
   private let none: [Any] = []
+  private let tinyJPEG = "data:image/jpeg;base64,/9j/wAARCAABAAEDAREAAhEAAxEA/9k="
+  private func png(
+    width: UInt32 = 1, height: UInt32 = 1, size: Int = 24,
+    chunkLength: UInt32 = 13, chunkType: String = "IHDR"
+  ) -> String {
+    var bytes = [UInt8](repeating: 0, count: max(size, 24))
+    bytes.replaceSubrange(0..<8, with: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    func putUInt32(_ offset: Int, _ value: UInt32) {
+      bytes[offset] = UInt8(truncatingIfNeeded: value >> 24)
+      bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 16)
+      bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 8)
+      bytes[offset + 3] = UInt8(truncatingIfNeeded: value)
+    }
+    putUInt32(8, chunkLength)
+    bytes.replaceSubrange(12..<16, with: Array(chunkType.utf8))
+    putUInt32(16, width)
+    putUInt32(20, height)
+    return "data:image/png;base64," + Data(bytes).base64EncodedString()
+  }
   private func defaults() throws -> [String: Any] {
     try XCTUnwrap(JSONSerialization.jsonObject(with: Data(AppearanceDefaults.json.utf8)) as? [String: Any])
   }
@@ -66,7 +85,7 @@ final class AppearanceBuilderTests: XCTestCase {
         ["type": "contact", "title": "", "text": "We answer within a day.", "items": none],
         [
           "type": "topics", "title": "Topics", "text": "",
-          "items": [topic(icon: "data:image/png;base64,iVBORw0KGgo="), topic(label: "Bugs", category: "bug_2", icon: "🐞")],
+          "items": [topic(icon: png()), topic(label: "Bugs", category: "bug_2", icon: "🐞")],
         ],
       ],
     ]
@@ -239,7 +258,8 @@ final class AppearanceBuilderTests: XCTestCase {
       topic(icon: String(repeating: "a", count: 33)), topic(icon: "<b>"), topic(icon: "a>b"),
       topic(icon: "data:image/gif;base64,R0lGOD=="), topic(icon: "data:image/png;base64,"),
       topic(icon: "data:image/png;base64,AA==AA"), topic(icon: "data:text/html,<b>"),
-      topic(icon: "data:image/png;base64," + String(repeating: "A", count: 700_040 - 21)),
+      topic(icon: png(width: 16_384, height: 16_384)), topic(icon: png(size: 525_001)),
+      topic(icon: png(chunkLength: 12)), topic(icon: png(chunkType: "IDAT")),
     ]
     for item in rejected {
       assertError(.invalidTopic, try built(items([item])), "\(item)")
@@ -250,8 +270,7 @@ final class AppearanceBuilderTests: XCTestCase {
     let accepted = [
       topic(label: String(repeating: "a", count: 80)), topic(category: "a" + String(repeating: "_", count: 49)),
       topic(category: "a1_b"), topic(icon: String(repeating: "a", count: 32)), topic(icon: "👤"), topic(icon: ""),
-      topic(icon: "data:image/png;base64,AA=="), topic(icon: "data:image/jpeg;base64,/9j/4AAQ"),
-      topic(icon: "data:image/png;base64," + String(repeating: "A", count: 700_040 - 22)),
+      topic(icon: png()), topic(icon: tinyJPEG), topic(icon: png(size: 525_000)),
     ]
     for item in accepted {
       XCTAssertNoThrow(try built(items([item])), "\(item)")
@@ -260,9 +279,15 @@ final class AppearanceBuilderTests: XCTestCase {
 
   /// Up to 1.5 MB as the widget measures it (the length of the compact JSON).
   func testTooLarge() throws {
-    let image = "data:image/png;base64," + String(repeating: "A", count: 520_000)
+    let image = png(size: 390_000)
     XCTAssertNoThrow(try built(items([topic(icon: image), topic(icon: image)])))
     assertError(.tooLarge, try built(items([topic(icon: image), topic(icon: image), topic(icon: image)])))
+  }
+
+  func testJSONInputsAreBoundedBeforeParsing() throws {
+    assertError(.tooLarge, try AppearanceBuilder(json: String(repeating: " ", count: 1_500_001)))
+    assertError(.tooLarge, try AppearanceBuilder(json: String(repeating: "é", count: 750_001)))
+    assertError(.tooLarge, try AppearanceBuilder().applyOverrides(String(repeating: " ", count: 1_500_001)))
   }
 
   func testErrorsReachObjectiveC() {

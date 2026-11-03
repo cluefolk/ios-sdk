@@ -37,6 +37,23 @@ final class BridgeContractTests: XCTestCase {
     XCTAssertNil(Cluefolk.bridgeRequest(value))
   }
 
+  @MainActor func testRejectsMalformedAndExtraNativePayloadFields() throws {
+    func rejected(_ name: String, _ payload: [String: Any]) throws {
+      var value = try envelope(name + ".json")
+      value["payload"] = payload
+      XCTAssertNil(Cluefolk.bridgeRequest(value), name)
+    }
+    try rejected("native.ready", ["extra": true])
+    try rejected("native.unreadCountChanged", ["count": -1])
+    try rejected("native.unreadCountChanged", ["count": "1"])
+    try rejected("native.unreadCountChanged", ["count": true])
+    try rejected("native.historyPage", ["syncId": "sync", "index": 0, "extra": true])
+    try rejected("native.historyPage", ["syncId": "sync", "index": false])
+    try rejected("native.conversationStatusChanged", ["conversationId": "conversation", "status": "unknown"])
+    try rejected("native.draftPut", ["key": "new", "content": "not-an-object"])
+    try rejected("native.imageGet", ["id": "0b6a9c3e-7d1f-4e2a-9c58-3f0e2d1b4a77", "extra": true])
+  }
+
   @MainActor func testDraftFixtureFitsWhitelist() throws {
     let payload = try XCTUnwrap(envelope("native.draftPut.json")["payload"] as? [String: Any])
     let content = try XCTUnwrap(payload["content"] as? [String: Any])

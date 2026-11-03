@@ -76,7 +76,16 @@ extension AppearanceError: LocalizedError {
 @objc(CLFAppearanceBuilder) public final class AppearanceBuilder: NSObject {
   static let paletteKeys = ["accent", "action", "background", "surface", "text"]
   private static let blockTypes = ["welcome", "topics", "contact"]
+  private static let maxJSONLength = 1_500_000
   private var value: [String: Any]
+
+  /// Bounds both representations before Foundation allocates a parsed object graph.
+  private static func boundedJSONData(_ json: String) throws -> Data {
+    guard json.utf16.count <= maxJSONLength else { throw AppearanceError.tooLarge }
+    let data = Data(json.utf8)
+    guard data.count <= maxJSONLength else { throw AppearanceError.tooLarge }
+    return data
+  }
 
   /// Starts from the default theme.
   @objc public override init() {
@@ -86,7 +95,8 @@ extension AppearanceError: LocalizedError {
   /// Starts from a theme file (appearance v2). Throws `AppearanceError.invalidJSON` for text
   /// that is not a JSON object, a version other than 2 or a key the theme does not have.
   @objc(initWithJSON:error:) public init(json: String) throws {
-    guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+    let data = try Self.boundedJSONData(json)
+    guard let object = try? JSONSerialization.jsonObject(with: data),
       let theme = object as? [String: Any], theme["version"] as? Int == 2, Self.knownKeys(theme)
     else { throw AppearanceError.invalidJSON }
     value = theme
@@ -159,7 +169,8 @@ extension AppearanceError: LocalizedError {
     if json.isEmpty { return self }
     let saved = value
     do {
-      guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+      let data = try Self.boundedJSONData(json)
+      guard let object = try? JSONSerialization.jsonObject(with: data),
         let changes = try Self.object(
           object, ["title", "mode", "rotation", "colors", "welcome", "topics", "contact"])
       else { throw AppearanceError.invalidJSON }
@@ -253,6 +264,53 @@ extension AppearanceError: LocalizedError {
     }
     return true
   }
+  /// Reads only bounded PNG/JPEG metadata. This rejects compressed images whose
+  /// small data URL would expand into an unsafe WebView raster.
+  private static func validEmbeddedImage(_ value: String) -> Bool {
+    guard value.utf16.count <= 700_040, let comma = value.firstIndex(of: ",") else { return false }
+    let prefix = String(value[..<comma])
+    guard prefix == "data:image/png;base64" || prefix == "data:image/jpeg;base64",
+      let data = Data(base64Encoded: String(value[value.index(after: comma)...])),
+      !data.isEmpty, data.count <= 525_000
+    else { return false }
+    let bytes = [UInt8](data)
+    func byte(_ offset: Int) -> Int { bytes.indices.contains(offset) ? Int(bytes[offset]) : -1 }
+    func uint16(_ offset: Int) -> Int { byte(offset) << 8 | byte(offset + 1) }
+    func uint32(_ offset: Int) -> Int {
+      byte(offset) << 24 | byte(offset + 1) << 16 | byte(offset + 2) << 8 | byte(offset + 3)
+    }
+    var width = 0
+    var height = 0
+    if prefix == "data:image/png;base64", bytes.count >= 24,
+      Array(bytes.prefix(8)) == [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+      uint32(8) == 13,
+      Array(bytes[12..<16]) == [0x49, 0x48, 0x44, 0x52]
+    {
+      width = uint32(16)
+      height = uint32(20)
+    } else if prefix == "data:image/jpeg;base64", byte(0) == 0xff, byte(1) == 0xd8 {
+      var offset = 2
+      while offset + 1 < bytes.count {
+        guard byte(offset) == 0xff else { break }
+        offset += 1
+        while byte(offset) == 0xff { offset += 1 }
+        let marker = byte(offset)
+        offset += 1
+        if marker == 0xda || marker == 0xd9 || marker < 0 { break }
+        if marker == 0x01 || (0xd0...0xd7).contains(marker) { continue }
+        if offset + 2 > bytes.count { break }
+        let length = uint16(offset)
+        if length < 2 || offset + length > bytes.count { break }
+        if (0xc0...0xcf).contains(marker), ![0xc4, 0xc8, 0xcc].contains(marker), length >= 8 {
+          height = uint16(offset + 3)
+          width = uint16(offset + 5)
+          break
+        }
+        offset += length
+      }
+    }
+    return width >= 1 && height >= 1 && width <= 2048 && height <= 2048 && width * height <= 4_194_304
+  }
   /// The checks of the widget's parseAppearance.
   private static func validate(_ theme: [String: Any]) throws {
     guard theme["version"] as? Int == 2, let mode = theme["mode"] as? String, ["system", "light", "dark"].contains(mode),
@@ -280,7 +338,7 @@ extension AppearanceError: LocalizedError {
           !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, label.utf16.count <= 80,
           matches(item["category"], "^[a-z][a-z0-9_]{0,49}\\z"), let icon = item["icon"] as? String,
           icon.hasPrefix("data:")
-            ? matches(icon, "^data:image/(png|jpeg);base64,[A-Za-z0-9+/]+=*\\z") && icon.utf16.count <= 700_040
+            ? validEmbeddedImage(icon)
             : icon.utf16.count <= 32 && !icon.contains("<") && !icon.contains(">")
         else { throw AppearanceError.invalidTopic }
       }

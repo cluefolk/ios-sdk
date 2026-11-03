@@ -8,6 +8,8 @@ set -eu
 version=${1:?usage: Scripts/build-xcframework.sh <version> [output directory]}
 cd "$(dirname "$0")/.."
 out=$(mkdir -p "${2:-build}" && cd "${2:-build}" && pwd)
+privacy="$PWD/Sources/CluefolkPrivacy/PrivacyInfo.xcprivacy"
+plutil -lint "$privacy" >/dev/null
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -19,7 +21,8 @@ for platform in iphoneos iphonesimulator; do
   esac
   xcodebuild archive -quiet -scheme Cluefolk -destination "$destination" \
     -archivePath "$work/$platform.xcarchive" -derivedDataPath "$work/$platform" \
-    SKIP_INSTALL=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES
+    SKIP_INSTALL=NO BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES
   framework="$work/$platform.xcarchive/Products/usr/local/lib/Cluefolk.framework"
   intermediates="$work/$platform/Build/Intermediates.noindex/ArchiveIntermediates/Cluefolk"
   # SwiftPM archives a bare framework: add the Objective-C header, the module map
@@ -39,6 +42,7 @@ MAP
   plutil -replace CFBundleIdentifier -string com.cluefolk.sdk "$framework/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$version" "$framework/Info.plist"
   plutil -replace CFBundleVersion -string "$version" "$framework/Info.plist"
+  cp "$privacy" "$framework/PrivacyInfo.xcprivacy"
   rm -rf "$framework/_CodeSignature"
   frameworks="$frameworks -framework $framework"
 done

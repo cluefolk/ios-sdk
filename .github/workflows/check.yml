@@ -5,5 +5,20 @@ jobs:
   compile:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: {persist-credentials: false}
       - run: xcodebuild -quiet -scheme Cluefolk -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES GCC_TREAT_WARNINGS_AS_ERRORS=YES build
+      - name: Test on an available iPhone simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator_id="$(
+            xcrun simctl list devices available --json |
+              jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid'
+          )"
+          xcodebuild -quiet -scheme Cluefolk \
+            -destination "platform=iOS Simulator,id=$simulator_id" \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            test

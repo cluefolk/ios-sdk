@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 — 2026-11-03
+
+- Validate appearance values and embedded images before parsing or WebView decoding; reject excessive dimensions and pixel counts.
+- Bound network responses and conversation history pagination; enforce bridge payload types.
+- Keep attachment previews bounded while preserving JPEG orientation and WebView compatibility.
+- Include the SDK privacy manifest in the Swift Package and both XCFramework slices.
+
 ## 0.3.1 — 2026-11-02
 
 Support screen updates.

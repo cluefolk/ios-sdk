@@ -20,4 +20,4 @@ For maintainers. A release is a tag of this repository (Swift Package Manager re
 
 5. Tag the commit with the version (`0.3.0`, no `v`), push the tag and create a GitHub release with the changelog entry and `build/Cluefolk.xcframework.zip`.
 
-Then update the Unity package: `Scripts/update-ios-framework.sh <path to this repository>`.
+Then update the Unity package from this clean release tag: `Tools~/update-ios-framework.sh <path to this repository> <expected widget digest>`.

@@ -19,7 +19,7 @@ In Xcode choose **File → Add Package Dependencies…**, enter `https://github.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/cluefolk/ios-sdk", from: "0.3.1"),
+    .package(url: "https://github.com/cluefolk/ios-sdk", from: "0.3.2"),
 ],
 targets: [
     .target(name: "YourGame", dependencies: [.product(name: "Cluefolk", package: "ios-sdk")]),

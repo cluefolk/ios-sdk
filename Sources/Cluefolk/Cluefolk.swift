@@ -83,7 +83,11 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
 
 @MainActor @objc(CLFCluefolk) public final class Cluefolk: NSObject {
   /// The SDK version, as tagged in the Swift package repository.
-  @objc public nonisolated static let sdkVersion = "0.3.1"
+  @objc public nonisolated static let sdkVersion = "0.3.2"
+  nonisolated static let maxResponseBytes = 1_048_576
+  /// The server emits at most 100 messages / 220 KB per page. This bounds one
+  /// bootstrap snapshot to 12,800 messages and about 28 MB of response JSON.
+  nonisolated static let maxHistoryPages = 128
   @objc public static let shared = Cluefolk()
   @objc public weak var eventListener: CluefolkEventListener? {
     didSet { if isReady { eventListener?.onCluefolkReady() } }
@@ -307,14 +311,22 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
     var cursors: Set<String> = []
     while true {
       guard generation == expected else { throw CluefolkError.accountChanged }
-      guard page["conversations"] is [[String: Any]], page["messages"] is [[String: Any]],
-        let next = page["nextCursor"] as? String, next.count <= 1024 else { throw CluefolkError.invalidResponse }
+      let next = try Self.historyNextCursor(page, pageCount: pages.count, cursors: &cursors)
       pages.append(page)
       if next.isEmpty { return pages }
-      guard cursors.insert(next).inserted,
-        let encoded = next.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { throw CluefolkError.invalidResponse }
+      guard let encoded = next.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+      else { throw CluefolkError.invalidResponse }
       page = try await request("/history?cursor=" + encoded, method: "GET", token: token)
     }
+  }
+  nonisolated static func historyNextCursor(
+    _ page: [String: Any], pageCount: Int, cursors: inout Set<String>
+  ) throws -> String {
+    guard pageCount < maxHistoryPages, page["conversations"] is [[String: Any]],
+      page["messages"] is [[String: Any]], let next = page["nextCursor"] as? String,
+      next.utf8.count <= 1024, next.isEmpty || cursors.insert(next).inserted
+    else { throw CluefolkError.invalidResponse }
+    return next
   }
   private func ensureSession() async throws {
     if let session, session.expiresAt > Date().addingTimeInterval(30) {
@@ -763,9 +775,55 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
       value["protocol"] as? String == BridgeProtocol.protocolName, value["version"] as? Int == BridgeProtocol.version,
       let id = value["requestId"] as? String, (1...128).contains(id.count),
       let type = value["type"] as? String, BridgeProtocol.nativeRequests.contains(type),
-      let payload = value["payload"] as? [String: Any]
+      let payload = value["payload"] as? [String: Any], validBridgePayload(type, payload)
     else { return nil }
     return (id, type, payload)
+  }
+  private static func validBridgePayload(_ type: String, _ payload: [String: Any]) -> Bool {
+    let keys = Set(payload.keys)
+    func string(_ name: String) -> String? {
+      guard let value = payload[name] as? String, (1...128).contains(value.count) else { return nil }
+      return value
+    }
+    func nonNegativeInteger(_ name: String) -> Bool {
+      guard let number = payload[name] as? NSNumber,
+        CFGetTypeID(number) != CFBooleanGetTypeID(), let value = number as? Int
+      else { return false }
+      return value >= 0
+    }
+    switch type {
+    case BridgeProtocol.nativeReady, BridgeProtocol.nativeAuthRequired, BridgeProtocol.nativeClose:
+      return keys.isEmpty
+    case BridgeProtocol.nativeUnreadCountChanged:
+      return keys == ["count"] && nonNegativeInteger("count")
+    case BridgeProtocol.nativeHistoryPage:
+      return keys == ["syncId", "index"] && string("syncId") != nil
+        && nonNegativeInteger("index")
+    case BridgeProtocol.nativeConversationCreated:
+      return keys == ["conversationId"] && string("conversationId") != nil
+    case BridgeProtocol.nativeConversationStatusChanged:
+      return keys == ["conversationId", "status"] && string("conversationId") != nil
+        && ["open", "pending_agent", "pending_player", "resolved", "closed"].contains(payload["status"] as? String ?? "")
+    case BridgeProtocol.nativeMessageSent:
+      return keys == ["conversationId", "messageId"] && string("conversationId") != nil && string("messageId") != nil
+    case BridgeProtocol.nativeDraftGet:
+      return keys == ["key"] && string("key") != nil
+    case BridgeProtocol.nativeDraftPut:
+      return keys == ["key", "content"] && string("key") != nil
+        && (payload["content"] is [String: Any] || payload["content"] is NSNull)
+    case BridgeProtocol.nativeImagePut:
+      return keys == ["id", "data"] && string("id").map(isImageId) == true && decodeImage(payload["data"]) != nil
+    case BridgeProtocol.nativeImageGet:
+      return keys == ["id"] && string("id").map(isImageId) == true
+    default:
+      return false
+    }
+  }
+  private static func bridgeError(_ requestId: String, code: String = "INVALID_BRIDGE_MESSAGE") -> [String: Any] {
+    [
+      "protocol": BridgeProtocol.protocolName, "version": BridgeProtocol.version, "requestId": requestId,
+      "type": BridgeProtocol.sdkError, "payload": ["code": code],
+    ]
   }
   func bootstrapPayload(code: String, apiURL: URL, session: StoredSession) -> [String: Any] {
     var combined = context
@@ -785,7 +843,10 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
     return result
   }
   fileprivate func handle(_ value: [String: Any], from view: WKWebView) async throws -> [String: Any] {
-    guard let message = Self.bridgeRequest(value) else { throw CluefolkError.invalidResponse }
+    guard let message = Self.bridgeRequest(value) else {
+      let requestId = (value["requestId"] as? String).flatMap { (1...128).contains($0.count) ? $0 : nil }
+      return Self.bridgeError(requestId ?? UUID().uuidString)
+    }
     let payload = message.payload
     var result: [String: Any] = [:]
     var responseType = BridgeProtocol.sdkAck
@@ -854,7 +915,13 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
       }
     } catch {
       responseType = BridgeProtocol.sdkError
-      result = ["code": Self.errorCode(error)]
+      if case CluefolkError.invalidResponse = error {
+        result = ["code": "INVALID_BRIDGE_MESSAGE"]
+      } else if case CluefolkError.unsupportedCommand = error {
+        result = ["code": "UNSUPPORTED_COMMAND"]
+      } else {
+        result = ["code": Self.errorCode(error)]
+      }
     }
     return [
       "protocol": BridgeProtocol.protocolName, "version": BridgeProtocol.version, "requestId": message.id,
@@ -927,8 +994,23 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if let token { request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
     if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
-    let (data, response) = try await network.data(for: request)
-    guard let http = response as? HTTPURLResponse else { throw CluefolkError.invalidResponse }
+    let (bytes, response) = try await network.bytes(for: request)
+    let task = bytes.task
+    guard let http = response as? HTTPURLResponse else {
+      task.cancel()
+      throw CluefolkError.invalidResponse
+    }
+    guard response.expectedContentLength <= Int64(Self.maxResponseBytes) else {
+      task.cancel()
+      throw CluefolkError.invalidResponse
+    }
+    let data: Data
+    do {
+      data = try await Self.boundedResponseData(bytes)
+    } catch {
+      task.cancel()
+      throw error
+    }
     guard (200..<300).contains(http.statusCode) else {
       let failure = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
       if http.statusCode == 403, (failure?["error"] as? [String: Any])?["code"] as? String == "IDENTITY_REQUIRED" {
@@ -936,10 +1018,20 @@ private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
       }
       throw CluefolkError.requestFailed(http.statusCode)
     }
-    guard data.count <= 1_048_576,
-      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { throw CluefolkError.invalidResponse }
     return result
+  }
+  nonisolated static func boundedResponseData<S: AsyncSequence>(
+    _ bytes: S, limit: Int = maxResponseBytes
+  ) async throws -> Data where S.Element == UInt8 {
+    var data = Data()
+    data.reserveCapacity(min(limit, 65_536))
+    for try await byte in bytes {
+      guard data.count < limit else { throw CluefolkError.invalidResponse }
+      data.append(byte)
+    }
+    return data
   }
   private func emitError(_ error: Error) { eventListener?.onCluefolkError(Self.errorCode(error)) }
   private static func errorCode(_ error: Error) -> String {
